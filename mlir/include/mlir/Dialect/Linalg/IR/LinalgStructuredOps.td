@@ -62,14 +62,13 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
 
       ```mlir
       linalg.generic #trait_attribute
-          ins(%A, %B : memref<?x?xf32, stride_specification>,
-                       memref<?x?xf32, stride_specification>)
-          outs(%C : memref<?x?xf32, stride_specification>)
+          ins(%A, %B : memref<?x?xf32>, memref<?x?xf32>)
+          outs(%C : memref<?x?xf32>)
           attrs = {other-optional-attributes}
           {region}
       ```
 
-    Where #trait_attributes is an alias of a dictionary attribute containing:
+    Where #trait_attribute is an alias of a dictionary attribute containing:
       - doc [optional]: a documentation string
       - indexing_maps: a list of AffineMapAttr, one AffineMapAttr per each input
         and output view. Such AffineMapAttr specifies the mapping between the
@@ -80,17 +79,17 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
         compile-time guarantees are provided. In the absence of such a library
         call, linalg.generic will always lower to loops.
       - iterator_types: an ArrayAttr specifying the type of the enclosing loops.
-        Each element of the list represents and iterator of one of the following
+        Each element of the list represents an iterator of one of the following
         types:
-          parallel, reduction, window
+          parallel, reduction
 
     Example:
     Defining a #matmul_trait attribute in MLIR can be done as follows:
       ```mlir
       #matmul_accesses = [
-        (m, n, k) -> (m, k),
-        (m, n, k) -> (k, n),
-        (m, n, k) -> (m, n)
+        affine_map<(m, n, k) -> (m, k)>,
+        affine_map<(m, n, k) -> (k, n)>,
+        affine_map<(m, n, k) -> (m, n)>
       ]
       #matmul_trait = {
         doc = "C(m, n) += A(m, k) * B(k, n)",
@@ -103,10 +102,9 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
     And can be reused in multiple places as:
       ```mlir
       linalg.generic #matmul_trait
-        ins(%A, %B : memref<?x?xf32, stride_specification>,
-                     memref<?x?xf32, stride_specification>)
-        outs(%C : memref<?x?xf32, stride_specification>)
-        {other-optional-attributes} {
+        ins(%A, %B : memref<?x?xf32>, memref<?x?xf32>)
+        outs(%C : memref<?x?xf32>)
+        attrs = {other-optional-attributes} {
         ^bb0(%a: f32, %b: f32, %c: f32) :
           %d = arith.mulf %a, %b: f32
           %e = arith.addf %c, %d: f32
@@ -117,9 +115,9 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
     This may lower to either:
       ```mlir
       call @linalg_matmul(%A, %B, %C) :
-        (memref<?x?xf32, stride_specification>,
-         memref<?x?xf32, stride_specification>,
-         memref<?x?xf32, stride_specification>)
+        (memref<?x?xf32, strided<[?, ?], offset: ?>>,
+         memref<?x?xf32, strided<[?, ?], offset: ?>>,
+         memref<?x?xf32, strided<[?, ?], offset: ?>>)
         -> ()
       ```
 
@@ -128,12 +126,12 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
     scf.for %m = %c0 to %M step %c1 {
       scf.for %n = %c0 to %N step %c1 {
         scf.for %k = %c0 to %K step %c1 {
-          %a = load %A[%m, %k] : memref<?x?xf32, stride_specification>
-          %b = load %B[%k, %n] : memref<?x?xf32, stride_specification>
-          %c = load %C[%m, %n] : memref<?x?xf32, stride_specification>
+          %a = memref.load %A[%m, %k] : memref<?x?xf32>
+          %b = memref.load %B[%k, %n] : memref<?x?xf32>
+          %c = memref.load %C[%m, %n] : memref<?x?xf32>
           %d = arith.mulf %a, %b: f32
           %e = arith.addf %c, %d: f32
-          store %e, %C[%m, %n] : memref<?x?x?xf32, stride_specification>
+          memref.store %e, %C[%m, %n] : memref<?x?xf32>
         }
       }
     }
@@ -222,7 +220,6 @@ def GenericOp : LinalgStructuredBase_Op<"generic", [
   let hasCanonicalizer = 1;
   let hasCustomAssemblyFormat = 1;
   let hasFolder = 1;
-  let hasVerifier = 1;
 }
 
 
@@ -235,8 +232,7 @@ def TensorOrMemref :
 
 def MapOp : LinalgStructuredBase_Op<"map", [
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
-    SingleBlockImplicitTerminator<"YieldOp">]> {
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>]> {
   let summary = "Elementwise operations";
   let description = [{
     Models elementwise operations on tensors in terms of arithmetic operations
@@ -293,10 +289,6 @@ def MapOp : LinalgStructuredBase_Op<"map", [
     // Implement functions necessary for DestinationStyleOpInterface.
     MutableOperandRange getDpsInitsMutable() { return getInitMutable(); }
 
-    SmallVector<OpOperand *> getOpOperandsMatchingBBargs() {
-      return getDpsInputOperands();
-    }
-
     bool payloadUsesValueFromOperand(OpOperand * opOperand) {
       if (isDpsInit(opOperand)) return false;
       return !getMatchingBlockArgument(opOperand).use_empty();
@@ -322,8 +314,7 @@ def MapOp : LinalgStructuredBase_Op<"map", [
 def ReduceOp : LinalgStructuredBase_Op<"reduce", [
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
-    SameVariadicOperandSize,
-    SingleBlockImplicitTerminator<"YieldOp">]> {
+    SameVariadicOperandSize]> {
   let summary = "Reduce operator";
   let description = [{
     Executes `combiner` on the `dimensions` of `inputs` and returns the
@@ -404,8 +395,7 @@ def ReduceOp : LinalgStructuredBase_Op<"reduce", [
 //===----------------------------------------------------------------------===//
 
 def TransposeOp : LinalgStructuredBase_Op<"transpose", [
-    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-    SingleBlockImplicitTerminator<"YieldOp">]> {
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Transpose operator";
   let description = [{
     Permutes the dimensions of `input` according to the given `permutation`.
@@ -481,11 +471,15 @@ def TransposeOp : LinalgStructuredBase_Op<"transpose", [
 //===----------------------------------------------------------------------===//
 
 def BroadcastOp : LinalgStructuredBase_Op<"broadcast", [
-    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
-    SingleBlockImplicitTerminator<"YieldOp">]> {
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
   let summary = "Static broadcast operator";
   let description = [{
     Broadcast the input into the given shape by adding `dimensions`.
+
+    Each index in the `dimensions` attribute refers to a dimension of `init`
+    that is added by the operation. The indices must be unique and within the
+    rank of `init`; the sizes of the remaining (non-added) dimensions of
+    `init` must match the shape of `input`.
 
     Example:
     ```mlir
@@ -551,8 +545,9 @@ def BroadcastOp : LinalgStructuredBase_Op<"broadcast", [
 //===----------------------------------------------------------------------===//
 // Op definition for ElementwiseOp
 //===----------------------------------------------------------------------===//
+
 def ElementwiseOp : LinalgStructuredBase_Op<"elementwise", [
-                   AttrSizedOperandSegments]> {
+                    AttrSizedOperandSegments]> {
   let summary = [{ Performs element-wise operation }];
   let description = [{
     The attribute `kind` describes arithmetic operation to perform. The
@@ -627,7 +622,6 @@ def ElementwiseOp : LinalgStructuredBase_Op<"elementwise", [
 
   let hasCustomAssemblyFormat = 1;
   let hasFolder = 1;
-  let hasVerifier = 1;
 
   let extraClassDeclaration = structuredOpsBaseDecls # [{
       /// Get the arity enum corresponding to the kind of op, e.g. if arg is
@@ -688,7 +682,6 @@ def ElementwiseOp : LinalgStructuredBase_Op<"elementwise", [
 def MatmulOp : LinalgStructuredBase_Op<"matmul", [
                AttrSizedOperandSegments,
                LinalgContractionOpInterface]> {
-
   let summary = [{
     Performs a matrix multiplication of two 2D inputs without broadcast or transpose.
     }];
@@ -820,8 +813,8 @@ def MatmulOp : LinalgStructuredBase_Op<"matmul", [
 //===----------------------------------------------------------------------===//
 
 def ContractOp : LinalgStructuredBase_Op<"contract", [
-               AttrSizedOperandSegments,
-               LinalgContractionOpInterface]> {
+                 AttrSizedOperandSegments,
+                 LinalgContractionOpInterface]> {
   let summary = [{
     Perform a contraction on two inputs, accumulating into the third.
   }];
@@ -891,7 +884,7 @@ def ContractOp : LinalgStructuredBase_Op<"contract", [
     AffineMapArrayAttr:$indexing_maps,
     DefaultValuedOptionalAttr<TypeFnAttr, "TypeFn::cast_signed">:$cast
   );
-  let results = (outs Variadic<AnyShaped>:$result_tensors);
+  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   // NB: The only reason this op has a region - and it get populated at op build
   //     time - is that currently the LinalgOp interface exposes methods that
   //     assume a relevant region is available to be queried at any time.
@@ -899,6 +892,13 @@ def ContractOp : LinalgStructuredBase_Op<"contract", [
 
   let skipDefaultBuilders = 1;
   let builders = [
+    OpBuilder<
+      (ins "ValueRange":$inputs, "ValueRange":$outputs,
+            CArg<"ArrayRef<NamedAttribute>", "{}">:$attributes),
+      [{
+        buildStructuredOp($_builder, $_state, std::nullopt, inputs, outputs,
+                          attributes, regionBuilder);
+      }]>,
     OpBuilder<(ins "TypeRange":$resultTensorTypes, "ValueRange":$inputs,
       "ValueRange":$outputs, "ArrayAttr":$indexingMaps,
       CArg<"ArrayRef<NamedAttribute>", "{}">:$attributes),
@@ -958,9 +958,9 @@ def ContractOp : LinalgStructuredBase_Op<"contract", [
 // Op definition for BatchMatmulOp
 //===----------------------------------------------------------------------===//
 
-def BatchMatmulOp : LinalgStructuredBase_Op<"batch_matmul", !listconcat([AttrSizedOperandSegments],
-  /*extraInterfaces=*/[LinalgContractionOpInterface])> {
-    
+def BatchMatmulOp : LinalgStructuredBase_Op<"batch_matmul", [
+                    AttrSizedOperandSegments,
+                    LinalgContractionOpInterface]> {
   let summary = [{Performs a batched matrix multiplication of two 3D inputs.}];
   let description = [{Numeric casting is performed on the operands to the inner multiply, promoting
     them to the same data type as the accumulator/output.
@@ -1091,7 +1091,6 @@ def BatchMatmulOp : LinalgStructuredBase_Op<"batch_matmul", !listconcat([AttrSiz
 def BatchReduceMatmulOp : LinalgStructuredBase_Op<"batch_reduce_matmul", [
                           AttrSizedOperandSegments,
                           LinalgContractionOpInterface]> {
-    
   let summary = [{Performs a batch-reduce matrix multiplication on two inputs.
     The partial multiplication results are reduced into a 2D output.}];
   let description = [{
